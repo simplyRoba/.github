@@ -47,13 +47,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-
-      - name: Install cross compilers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Cache Cargo registry and target artifacts
         uses: actions/cache@v6
@@ -65,7 +58,7 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Prime cache
-        run: cargo fetch
+        run: cargo fetch --locked
 
   compile:
     name: Compile
@@ -118,7 +111,7 @@ jobs:
             unset RUSTFLAGS
           fi
           export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-          cargo build --release --target ${{ matrix.triple }}
+          cargo build --locked --release --target "${{ matrix.triple }}"
 
       - name: Collect release binary
         env:

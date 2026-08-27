@@ -1,0 +1,239 @@
+name: Rust Publish Release
+
+on:
+  workflow_call:
+    inputs:
+      binary-name:
+        description: Name of the release binary produced by `cargo build --release`
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Prepare release toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Verify release event context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "$EVENT_NAME" != "release" ]]; then
+            echo "::error::This workflow must be called from a 'release' event, got '${EVENT_NAME}'."
+            exit 1
+          fi
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "::error::github.event.release.tag_name is empty."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/tags/${RELEASE_TAG}" ]]; then
+            echo "::error::GITHUB_REF '${GITHUB_REF}' does not match the released tag '${RELEASE_TAG}'."
+            exit 1
+          fi
+          echo "Publishing ${GITHUB_REPOSITORY} at refs/tags/${RELEASE_TAG} (prerelease=${{ github.event.release.prerelease }})."
+
+      - name: Checkout released tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Install cross compilers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo registry and target artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Prime cache
+        run: cargo fetch
+
+  compile:
+    name: Compile
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            triple: x86_64-unknown-linux-gnu
+            rustflags: ''
+          - target: linux-arm64
+            triple: aarch64-unknown-linux-gnu
+            rustflags: "-Clinker=aarch64-linux-gnu-gcc"
+    steps:
+      - name: Checkout released tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+
+      - name: Restore Cargo cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+
+      - name: Install aarch64 cross compiler
+        if: ${{ matrix.target == 'linux-arm64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.rustflags }}" != "" ]; then
+            export RUSTFLAGS="${{ matrix.rustflags }}"
+          else
+            unset RUSTFLAGS
+          fi
+          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+          cargo build --release --target ${{ matrix.triple }}
+
+      - name: Collect release binary
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+          TARGET: ${{ matrix.target }}
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "release-artifacts/${TARGET}"
+          cp "target/${TRIPLE}/release/${BINARY_NAME}" \
+            "release-artifacts/${TARGET}/${BINARY_NAME}"
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-binaries-${{ matrix.target }}
+          path: release-artifacts/${{ matrix.target }}
+
+  upload-release-assets:
+    name: Upload binaries to release
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binaries-linux-amd64
+          path: release-artifacts/linux-amd64
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binaries-linux-arm64
+          path: release-artifacts/linux-arm64
+
+      - name: Rename release assets
+        env:
+          BINARY_NAME: ${{ inputs.binary-name }}
+        run: |
+          set -Eeuo pipefail
+          for target in linux-amd64 linux-arm64; do
+            mv "release-artifacts/${target}/${BINARY_NAME}" \
+              "release-artifacts/${target}/${BINARY_NAME}-${target}"
+          done
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            release-artifacts/linux-amd64/${{ inputs.binary-name }}-linux-amd64
+            release-artifacts/linux-arm64/${{ inputs.binary-name }}-linux-arm64
+
+  docker:
+    name: Build and push Docker image
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout released tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ github.event.release.tag_name }}
+
+      - name: Download linux/amd64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binaries-linux-amd64
+          path: release-artifacts/linux-amd64
+
+      - name: Download linux/arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: release-binaries-linux-arm64
+          path: release-artifacts/linux-arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # Stable aliases are gated on the authoritative release event boolean,
+          # never on tag-string parsing.
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !github.event.release.prerelease }}
+            type=semver,pattern={{major}},enable=${{ !github.event.release.prerelease }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

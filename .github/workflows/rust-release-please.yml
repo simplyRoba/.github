@@ -1,0 +1,36 @@
+name: Rust Release Please
+
+on:
+  workflow_call:
+    secrets:
+      RELEASE_BOT_CLIENT_ID:
+        description: Client ID of the GitHub App used by Release Please
+        required: true
+      RELEASE_BOT_PRIVATE_KEY:
+        description: Private key of the GitHub App used by Release Please
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    name: Run Release Please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate release bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          # release-type and changelog sections are configured via the calling
+          # repository's release-please-config.json + .release-please-manifest.json
+          # (auto-detected by release-please-action@v5 in ${{ github.repository }}).
+          token: ${{ steps.app-token.outputs.token }}

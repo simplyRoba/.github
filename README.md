@@ -6,39 +6,45 @@ Reusable GitHub Actions workflows for the `simplyRoba` repositories.
 
 Consumers should use `@v1`. Use `@v1.0.0` when an immutable exact version is required.
 
-### Publishing a shared-workflow version
+### Creating the initial version and major tags
 
-1. Update and verify `main`.
-2. Create and push a new immutable semantic-version tag (never force-push this tag):
+```bash
+git switch main
+git pull --ff-only
+commit=$(git rev-parse HEAD)
 
-   ```bash
-   git switch main
-   git pull --ff-only
-   git tag v1.0.1
-   git push origin refs/tags/v1.0.1
-   ```
+git tag v1.0.0 "$commit"
+git tag v1 "$commit"
+git push --atomic origin refs/tags/v1.0.0 refs/tags/v1
+```
 
-3. Publish a stable GitHub Release for that exact tag:
+### Creating a new v1 version and moving v1
 
-   ```bash
-   gh release create v1.0.1 \
-     --verify-tag \
-     --title v1.0.1 \
-     --generate-notes
-   ```
+```bash
+git switch main
+git pull --ff-only
+commit=$(git rev-parse HEAD)
 
-4. Verify that the release workflow moved `v1` to the same commit:
+git tag v1.0.1 "$commit"
+git tag -f v1 "$commit"
 
-   ```bash
-   git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.1
-   ```
+# Create the immutable version tag and force-update only the movable v1 tag.
+git push --atomic origin refs/tags/v1.0.1 +refs/tags/v1
+```
+
+Verify both tags resolve to the intended commit:
+
+```bash
+git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.1
+```
 
 Rules:
 
-* `v1.x.y` tags are immutable and never move.
-* Publishing a stable `v1.x.y` release automatically moves `v1`.
-* Prereleases and malformed tags do not move a major tag.
-* Breaking workflow-interface changes start at `v2.0.0`; publishing it moves `v2`, not `v1`.
+* Never move or force-push a `v1.x.y` tag.
+* Only the major tag (`v1`, `v2`, ...) is movable.
+* A published stable `v1.x.y` GitHub Release performs the `v1` movement automatically.
+* Prereleases and malformed release tags do not move a major tag.
+* Breaking workflow-interface changes start at `v2.0.0` and move `v2`, never `v1`.
 
 ## Rust release workflows
 

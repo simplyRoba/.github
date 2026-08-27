@@ -23,4 +23,4 @@ Consumers should pin a reviewed immutable commit while the workflow is initially
 
 ## License
 
-GPL-3.0-only. See [LICENSE](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).

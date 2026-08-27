@@ -4,7 +4,41 @@ Reusable GitHub Actions workflows for the `simplyRoba` repositories.
 
 ## Versioning
 
-Use `@v1` as the recommended consumer reference. It advances automatically when a compatible stable `v1.x.y` release is published. Use an exact tag such as `@v1.0.0` when an immutable version is required; `v1.x.y` tags never move. Breaking shared-workflow interface changes require a new major tag such as `v2`.
+Consumers should use `@v1`. Use `@v1.0.0` when an immutable exact version is required.
+
+### Publishing a shared-workflow version
+
+1. Update and verify `main`.
+2. Create and push a new immutable semantic-version tag (never force-push this tag):
+
+   ```bash
+   git switch main
+   git pull --ff-only
+   git tag v1.0.1
+   git push origin refs/tags/v1.0.1
+   ```
+
+3. Publish a stable GitHub Release for that exact tag:
+
+   ```bash
+   gh release create v1.0.1 \
+     --verify-tag \
+     --title v1.0.1 \
+     --generate-notes
+   ```
+
+4. Verify that the release workflow moved `v1` to the same commit:
+
+   ```bash
+   git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.1
+   ```
+
+Rules:
+
+* `v1.x.y` tags are immutable and never move.
+* Publishing a stable `v1.x.y` release automatically moves `v1`.
+* Prereleases and malformed tags do not move a major tag.
+* Breaking workflow-interface changes start at `v2.0.0`; publishing it moves `v2`, not `v1`.
 
 ## Rust release workflows
 

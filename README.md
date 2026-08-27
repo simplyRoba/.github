@@ -2,7 +2,9 @@
 
 Reusable GitHub Actions workflows for the `simplyRoba` repositories.
 
-Consumers should pin a reviewed immutable commit while a workflow is initially tested. Once validated, publish a versioned workflow ref (for example `v1`); breaking interface changes must use a new major ref.
+## Versioning
+
+Use `@v1` as the recommended consumer reference. It advances automatically when a compatible stable `v1.x.y` release is published. Use an exact tag such as `@v1.0.0` when an immutable version is required; `v1.x.y` tags never move. Breaking shared-workflow interface changes require a new major tag such as `v2`.
 
 ## Rust release workflows
 
@@ -31,7 +33,7 @@ jobs:
   release-please:
     permissions:
       contents: read
-    uses: simplyRoba/.github/.github/workflows/rust-release-please.yml@<reviewed-commit-sha>
+    uses: simplyRoba/.github/.github/workflows/rust-release-please.yml@v1
     secrets: inherit
 ```
 
@@ -51,7 +53,7 @@ jobs:
   prerelease:
     permissions:
       contents: read
-    uses: simplyRoba/.github/.github/workflows/rust-create-prerelease.yml@<reviewed-commit-sha>
+    uses: simplyRoba/.github/.github/workflows/rust-create-prerelease.yml@v1
     secrets: inherit
 ```
 
@@ -75,7 +77,7 @@ jobs:
     permissions:
       contents: write
       packages: write
-    uses: simplyRoba/.github/.github/workflows/rust-publish-release.yml@<reviewed-commit-sha>
+    uses: simplyRoba/.github/.github/workflows/rust-publish-release.yml@v1
     with:
       binary-name: my-binary
 ```

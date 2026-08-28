@@ -6,15 +6,7 @@ Reusable GitHub Actions workflows for the `simplyRoba` repositories.
 
 Consumers normally use `@v1`. Exact pinning uses an immutable `@v1.x.y` tag, for example `@v1.0.0`.
 
-### Initial version
-
-```bash
-git tag v1.0.0 <commit>
-git tag v1 <commit>
-git push --atomic origin refs/tags/v1.0.0 refs/tags/v1
-```
-
-### Next compatible version
+### Publishing the next compatible v1 version
 
 ```bash
 git tag v1.0.1 <commit>

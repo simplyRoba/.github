@@ -34,77 +34,32 @@ jobs:
       - name: Find pending Release Please pull request
         id: release-pr
         env:
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          fail() {
-            echo "::error::$*"
+          default_branch=$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq '.defaultBranchRef.name')
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+            --state open --base "$default_branch" --label 'autorelease: pending' \
+            --json number,url,headRefOid,body)
+
+          count=$(jq 'length' <<<"$prs")
+          if [[ "$count" -ne 1 ]]; then
+            echo "::error::Expected exactly one open 'autorelease: pending' pull request targeting '${default_branch}', found ${count}."
             exit 1
-          }
-
-          default_branch=$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
-          [[ -n "$default_branch" && "$default_branch" != "null" ]] || \
-            fail "Could not determine the default branch for ${GITHUB_REPOSITORY}."
-
-          all_prs=$(gh api --paginate --slurp \
-            "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100")
-          candidates=$(jq -c '
-            add
-            | map(select(any(.labels[]?; .name == "autorelease: pending")))
-          ' <<<"$all_prs")
-          count=$(jq 'length' <<<"$candidates")
-
-          if [[ "$count" -eq 0 ]]; then
-            fail "No open pull request with the 'autorelease: pending' label exists in ${GITHUB_REPOSITORY}."
-          elif [[ "$count" -gt 1 ]]; then
-            numbers=$(jq -r 'map("#" + (.number | tostring)) | join(", ")' <<<"$candidates")
-            fail "Multiple pending Release Please pull requests are ambiguous: ${numbers}."
           fi
 
-          base_branch=$(jq -r '.[0].base.ref' <<<"$candidates")
-          [[ "$base_branch" == "$default_branch" ]] || \
-            fail "Pending Release Please PR targets '${base_branch}', but the repository default release branch is '${default_branch}'."
-
-          is_release_please=$(jq -r '
-            .[0]
-            | ((.head.ref // "") | startswith("release-please--"))
-              or ((.body // "") | contains("[Release Please]"))
-          ' <<<"$candidates")
-          [[ "$is_release_please" == "true" ]] || \
-            fail "The pending PR does not contain recognizable Release Please metadata."
-
-          pr_author=$(jq -r '.[0].user.login // ""' <<<"$candidates")
-          [[ "$pr_author" == "${APP_SLUG}[bot]" ]] || \
-            fail "Pending PR author '${pr_author}' is not the configured Release Please App '${APP_SLUG}[bot]'."
-
-          head_repository=$(jq -r '.[0].head.repo.full_name // ""' <<<"$candidates")
-          [[ "$head_repository" == "$GITHUB_REPOSITORY" ]] || \
-            fail "Release Please PR head belongs to '${head_repository}', not '${GITHUB_REPOSITORY}'."
-
-          head_sha=$(jq -r '.[0].head.sha // ""' <<<"$candidates")
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || \
-            fail "Release Please PR HEAD SHA is missing or malformed."
-          resolved_sha=$(gh api "/repos/${GITHUB_REPOSITORY}/commits/${head_sha}" --jq '.sha')
-          [[ "$resolved_sha" == "$head_sha" ]] || \
-            fail "Release Please PR HEAD SHA '${head_sha}' could not be resolved exactly."
-
-          pr_number=$(jq -r '.[0].number' <<<"$candidates")
-          pr_url=$(jq -r '.[0].html_url' <<<"$candidates")
           notes_file="${RUNNER_TEMP}/release-please-notes.md"
-          jq -r '.[0].body // ""' <<<"$candidates" >"$notes_file"
+          jq -r '.[0].body // ""' <<<"$prs" >"$notes_file"
 
           {
-            echo "default_branch=$default_branch"
-            echo "pr_number=$pr_number"
-            echo "pr_url=$pr_url"
-            echo "head_sha=$head_sha"
+            echo "head_sha=$(jq -r '.[0].headRefOid' <<<"$prs")"
+            echo "pr_url=$(jq -r '.[0].url' <<<"$prs")"
             echo "notes_file=$notes_file"
           } >>"$GITHUB_OUTPUT"
 
-          echo "Using Release Please PR #${pr_number} at ${head_sha}."
+          echo "Using Release Please PR #$(jq -r '.[0].number' <<<"$prs")."
 
       - name: Checkout Release Please candidate
         uses: actions/checkout@v7
@@ -117,237 +72,75 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Determine stable Cargo candidate
-        id: candidate
+      - name: Determine prerelease version
+        id: version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          fail() {
-            echo "::error::$*"
+          read -r package_name candidate < <(cargo metadata --format-version 1 --no-deps --locked \
+            | jq -r '.workspace_root as $root
+                     | .packages[]
+                     | select(.manifest_path == ($root + "/Cargo.toml"))
+                     | "\(.name) \(.version)"')
+
+          if [[ ! "$candidate" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Root Cargo version '${candidate}' is not a stable X.Y.Z version."
             exit 1
-          }
-
-          metadata_file="${RUNNER_TEMP}/cargo-metadata-candidate.json"
-          cargo metadata --format-version 1 --no-deps --locked >"$metadata_file"
-
-          root_packages=$(jq -c '
-            .workspace_root as $root
-            | [.packages[] | select(.manifest_path == ($root + "/Cargo.toml"))]
-          ' "$metadata_file")
-          root_count=$(jq 'length' <<<"$root_packages")
-          [[ "$root_count" -eq 1 ]] || \
-            fail "Expected exactly one root Cargo package, found ${root_count}."
-
-          package_name=$(jq -r '.[0].name' <<<"$root_packages")
-          candidate_version=$(jq -r '.[0].version' <<<"$root_packages")
-          if ! python3 - "$candidate_version" <<'PY'
-          import re
-          import sys
-
-          version = sys.argv[1]
-          stable_semver = re.compile(
-              r"^(0|[1-9][0-9]*)\."
-              r"(0|[1-9][0-9]*)\."
-              r"(0|[1-9][0-9]*)$"
-          )
-          raise SystemExit(0 if stable_semver.fullmatch(version) else 1)
-          PY
-          then
-            fail "Root Cargo package version '${candidate_version}' is not a normal stable X.Y.Z SemVer candidate."
           fi
 
+          next=1
+          while read -r tag; do
+            number=${tag#"v${candidate}-next."}
+            [[ "$number" =~ ^[1-9][0-9]*$ ]] || continue
+            if (( number >= next )); then
+              next=$((number + 1))
+            fi
+          done < <(gh api --paginate \
+            "/repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${candidate}-next." \
+            --jq '.[].ref | sub("^refs/tags/"; "")')
+
+          prerelease="${candidate}-next.${next}"
           {
             echo "package_name=$package_name"
-            echo "version=$candidate_version"
+            echo "version=$prerelease"
+            echo "tag=v$prerelease"
           } >>"$GITHUB_OUTPUT"
-          echo "Release Please candidate is ${package_name} ${candidate_version}."
 
-      - name: Allocate next prerelease number
-        id: allocation
-        env:
-          CANDIDATE_VERSION: ${{ steps.candidate.outputs.version }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_HEAD_SHA: ${{ steps.release-pr.outputs.head_sha }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          fail() {
-            echo "::error::$*"
-            exit 1
-          }
-
-          gh auth setup-git
-          git fetch --tags --prune origin
-          remote_tags_file="${RUNNER_TEMP}/remote-prerelease-tags.txt"
-          git ls-remote --tags origin "refs/tags/v${CANDIDATE_VERSION}-next.*" \
-            | awk '{sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2}' \
-            | sort -u >"$remote_tags_file"
-
-          releases_file="${RUNNER_TEMP}/github-releases.json"
-          gh api --paginate --slurp \
-            "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-            | jq 'add' >"$releases_file"
-
-          max_number=0
-          orphan_tag=""
-          tag_pattern="^v${CANDIDATE_VERSION//./\\.}-next\\.([1-9][0-9]*)$"
-
-          while IFS= read -r tag; do
-            [[ -n "$tag" ]] || continue
-            if [[ ! "$tag" =~ $tag_pattern ]]; then
-              fail "Malformed historical prerelease tag '${tag}' uses the candidate next prefix."
-            fi
-
-            number=${BASH_REMATCH[1]}
-            [[ "${#number}" -le 18 ]] || \
-              fail "Prerelease number in tag '${tag}' is too large to allocate safely."
-            (( number > max_number )) && max_number=$number
-
-            release_count=$(jq --arg tag "$tag" \
-              '[.[] | select(.tag_name == $tag)] | length' "$releases_file")
-            if [[ "$release_count" -eq 0 ]]; then
-              [[ -z "$orphan_tag" ]] || \
-                fail "Multiple prerelease tags have no GitHub Release: '${orphan_tag}' and '${tag}'."
-              orphan_tag="$tag"
-            elif [[ "$release_count" -gt 1 ]]; then
-              fail "Multiple GitHub Releases unexpectedly use tag '${tag}'."
-            else
-              release_state=$(jq -r --arg tag "$tag" '
-                .[] | select(.tag_name == $tag)
-                | "\(.prerelease):\(.draft)"
-              ' "$releases_file")
-              [[ "$release_state" == "true:false" ]] || \
-                fail "Existing tag '${tag}' does not belong to a published GitHub prerelease."
-            fi
-          done <"$remote_tags_file"
-
-          if [[ -n "$orphan_tag" ]]; then
-            prerelease_version=${orphan_tag#v}
-            tag_commit=$(git rev-list -n 1 "$orphan_tag")
-            parent_line=$(git rev-list --parents -n 1 "$tag_commit")
-            read -r -a commit_and_parents <<<"$parent_line"
-            [[ "${#commit_and_parents[@]}" -eq 2 ]] || \
-              fail "Orphan tag '${orphan_tag}' does not point to a single-parent synthetic commit."
-            [[ "${commit_and_parents[1]}" == "$PR_HEAD_SHA" ]] || \
-              fail "Orphan tag '${orphan_tag}' is based on a different Release Please PR HEAD. Resolve it manually before retrying."
-
-            git checkout --detach "$tag_commit"
-            tagged_version=$(cargo metadata --format-version 1 --no-deps --locked \
-              | jq -r '.workspace_root as $root | .packages[] | select(.manifest_path == ($root + "/Cargo.toml")) | .version')
-            [[ "$tagged_version" == "$prerelease_version" ]] || \
-              fail "Orphan tag '${orphan_tag}' reports Cargo version '${tagged_version}', not '${prerelease_version}'."
-
-            changed_files=$(git diff-tree --no-commit-id --name-only -r "$tag_commit" | sort)
-            [[ "$changed_files" == $'Cargo.lock\nCargo.toml' ]] || \
-              fail "Orphan tag '${orphan_tag}' synthetic commit contains changes outside Cargo.toml and Cargo.lock."
-            recovery=true
-            echo "Recovering orphan tag ${orphan_tag}; no new number will be allocated."
-          else
-            next_number=$((max_number + 1))
-            (( next_number > 0 )) || fail "Prerelease number overflow for ${CANDIDATE_VERSION}."
-            prerelease_version="${CANDIDATE_VERSION}-next.${next_number}"
-            orphan_tag="v${prerelease_version}"
-            recovery=false
-            echo "Allocated ${orphan_tag}."
-          fi
-
-          {
-            echo "tag=$orphan_tag"
-            echo "version=$prerelease_version"
-            echo "recovery=$recovery"
-          } >>"$GITHUB_OUTPUT"
+          echo "Preparing prerelease ${prerelease} for ${package_name}."
 
       - name: Install Cargo manifest version tool
-        if: steps.allocation.outputs.recovery != 'true'
         run: cargo install set-cargo-version --version 1.2.1 --locked
 
-      - name: Apply and validate Cargo prerelease version
-        if: steps.allocation.outputs.recovery != 'true'
+      - name: Apply Cargo prerelease version
         env:
-          PRERELEASE_VERSION: ${{ steps.allocation.outputs.version }}
+          PACKAGE_NAME: ${{ steps.version.outputs.package_name }}
+          PRERELEASE_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          fail() {
-            echo "::error::$*"
-            exit 1
-          }
 
           set-cargo-version Cargo.toml "$PRERELEASE_VERSION"
-          cargo update --workspace
+          cargo update --package "$PACKAGE_NAME" --precise "$PRERELEASE_VERSION"
+          cargo metadata --locked --format-version 1 >/dev/null
 
-          metadata_file="${RUNNER_TEMP}/cargo-metadata-prerelease.json"
-          cargo metadata --format-version 1 --no-deps --locked >"$metadata_file"
-          actual_version=$(jq -r '
-            .workspace_root as $root
-            | .packages[]
-            | select(.manifest_path == ($root + "/Cargo.toml"))
-            | .version
-          ' "$metadata_file")
-          [[ "$actual_version" == "$PRERELEASE_VERSION" ]] || \
-            fail "Cargo metadata reports '${actual_version}', expected '${PRERELEASE_VERSION}'."
-
-          git diff --quiet -- Cargo.toml && \
-            fail "Cargo.toml was not updated to the prerelease version."
-          [[ -f Cargo.lock ]] || fail "The repository has no root Cargo.lock file."
-          git diff --quiet -- Cargo.lock && \
-            fail "Cargo.lock was not updated to the prerelease version."
-          git diff --check
-
-          changed_files=$(git status --short | awk '{print $2}' | sort)
-          [[ "$changed_files" == $'Cargo.lock\nCargo.toml' ]] || \
-            fail "Prerelease adjustment changed files other than Cargo.toml and Cargo.lock: ${changed_files}"
-
-      - name: Revalidate Release Please PR HEAD
-        env:
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          EXPECTED_BASE: ${{ steps.release-pr.outputs.default_branch }}
-          EXPECTED_SHA: ${{ steps.release-pr.outputs.head_sha }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUMBER: ${{ steps.release-pr.outputs.pr_number }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          current_default=$(gh api "/repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
-          all_prs=$(gh api --paginate --slurp \
-            "/repos/${GITHUB_REPOSITORY}/pulls?state=open&per_page=100")
-          candidates=$(jq -c '
-            add
-            | map(select(any(.labels[]?; .name == "autorelease: pending")))
-          ' <<<"$all_prs")
-          count=$(jq 'length' <<<"$candidates")
-          number=$(jq -r 'if length == 1 then .[0].number else "" end' <<<"$candidates")
-          base=$(jq -r 'if length == 1 then .[0].base.ref else "" end' <<<"$candidates")
-          sha=$(jq -r 'if length == 1 then .[0].head.sha else "" end' <<<"$candidates")
-          author=$(jq -r 'if length == 1 then .[0].user.login else "" end' <<<"$candidates")
-
-          if [[ "$current_default" != "$EXPECTED_BASE" || "$count" -ne 1 || \
-                "$number" != "$PR_NUMBER" || "$base" != "$EXPECTED_BASE" || \
-                "$sha" != "$EXPECTED_SHA" || "$author" != "${APP_SLUG}[bot]" ]]; then
-            echo "::error::Release Please PR changed or became ambiguous while the prerelease was being prepared; no tag was published. Retry from its current HEAD."
+          changed=$(git status --porcelain | awk '{print $2}' | sort | paste -sd, -)
+          if [[ "$changed" != "Cargo.lock,Cargo.toml" ]]; then
+            echo "::error::Expected only Cargo.toml and Cargo.lock to change, got: ${changed}"
             exit 1
           fi
 
       - name: Create and push synthetic prerelease tag
-        if: steps.allocation.outputs.recovery != 'true'
         env:
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_HEAD_SHA: ${{ steps.release-pr.outputs.head_sha }}
-          PRERELEASE_TAG: ${{ steps.allocation.outputs.tag }}
-          PRERELEASE_VERSION: ${{ steps.allocation.outputs.version }}
+          PRERELEASE_TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          fail() {
-            echo "::error::$*"
-            exit 1
-          }
 
           bot_id=$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')
           gh auth setup-git
@@ -356,35 +149,15 @@ jobs:
 
           git add Cargo.toml Cargo.lock
           git commit -m "chore: prepare ${PRERELEASE_VERSION} prerelease"
-          [[ "$(git rev-parse HEAD^)" == "$PR_HEAD_SHA" ]] || \
-            fail "Synthetic commit parent is not the exact Release Please PR HEAD."
-
-          committed_files=$(git diff-tree --no-commit-id --name-only -r HEAD | sort)
-          [[ "$committed_files" == $'Cargo.lock\nCargo.toml' ]] || \
-            fail "Synthetic commit contains changes outside Cargo.toml and Cargo.lock."
-
           git tag "$PRERELEASE_TAG"
-          set +e
-          git ls-remote --exit-code --tags origin "refs/tags/${PRERELEASE_TAG}" >/dev/null
-          tag_status=$?
-          set -e
-          if [[ "$tag_status" -eq 0 ]]; then
-            fail "Tag '${PRERELEASE_TAG}' appeared before push; refusing to overwrite it."
-          elif [[ "$tag_status" -ne 2 ]]; then
-            fail "Could not verify that remote tag '${PRERELEASE_TAG}' is absent."
-          fi
-
           git push origin "refs/tags/${PRERELEASE_TAG}"
-          remote_sha=$(git ls-remote --tags origin "refs/tags/${PRERELEASE_TAG}" | awk '{print $1}')
-          [[ "$remote_sha" == "$(git rev-parse HEAD)" ]] || \
-            fail "Remote tag '${PRERELEASE_TAG}' does not point to the synthetic commit."
 
       - name: Publish GitHub prerelease
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NOTES_FILE: ${{ steps.release-pr.outputs.notes_file }}
-          PRERELEASE_TAG: ${{ steps.allocation.outputs.tag }}
-          PRERELEASE_VERSION: ${{ steps.allocation.outputs.version }}
+          PRERELEASE_TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_PR_URL: ${{ steps.release-pr.outputs.pr_url }}
         shell: bash
         run: |
@@ -399,27 +172,10 @@ jobs:
             cat "$NOTES_FILE"
           } >"$release_notes"
 
-          if ! gh release create "$PRERELEASE_TAG" \
+          gh release create "$PRERELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --prerelease \
             --latest=false \
             --title "$PRERELEASE_VERSION" \
-            --notes-file "$release_notes"; then
-            echo "::error::Tag '${PRERELEASE_TAG}' exists without a GitHub Release. Rerun this workflow to recover that exact tag after resolving the release error."
-            exit 1
-          fi
-
-          release=$(gh api "/repos/${GITHUB_REPOSITORY}/releases/tags/${PRERELEASE_TAG}")
-          state=$(jq -r '"\(.tag_name):\(.prerelease):\(.draft)"' <<<"$release")
-          [[ "$state" == "${PRERELEASE_TAG}:true:false" ]] || {
-            echo "::error::GitHub Release verification failed: ${state}"
-            exit 1
-          }
-          latest_tag=$(gh api "/repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')
-          [[ "$latest_tag" != "$PRERELEASE_TAG" ]] || {
-            echo "::error::GitHub unexpectedly marked prerelease '${PRERELEASE_TAG}' as latest."
-            exit 1
-          }
-
-          echo "Published ${PRERELEASE_TAG} as a GitHub prerelease (not latest)."
+            --notes-file "$release_notes"

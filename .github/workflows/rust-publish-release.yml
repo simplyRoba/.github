@@ -12,57 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  setup:
-    name: Prepare release toolchain
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Verify release event context
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          if [[ "$EVENT_NAME" != "release" ]]; then
-            echo "::error::This workflow must be called from a 'release' event, got '${EVENT_NAME}'."
-            exit 1
-          fi
-          if [[ -z "$RELEASE_TAG" ]]; then
-            echo "::error::github.event.release.tag_name is empty."
-            exit 1
-          fi
-          if [[ "$GITHUB_REF" != "refs/tags/${RELEASE_TAG}" ]]; then
-            echo "::error::GITHUB_REF '${GITHUB_REF}' does not match the released tag '${RELEASE_TAG}'."
-            exit 1
-          fi
-          echo "Publishing ${GITHUB_REPOSITORY} at refs/tags/${RELEASE_TAG} (prerelease=${{ github.event.release.prerelease }})."
-
-      - name: Checkout released tag
-        uses: actions/checkout@v7
-        with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry and target artifacts
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Prime cache
-        run: cargo fetch --locked
-
   compile:
-    name: Compile
-    needs: setup
+    name: Compile ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -72,30 +23,27 @@ jobs:
         include:
           - target: linux-amd64
             triple: x86_64-unknown-linux-gnu
-            rustflags: ''
           - target: linux-arm64
             triple: aarch64-unknown-linux-gnu
-            rustflags: "-Clinker=aarch64-linux-gnu-gcc"
     steps:
       - name: Checkout released tag
         uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ github.event.release.tag_name }}
 
-      - name: Restore Cargo cache
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Cache Cargo registry and target artifacts
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install aarch64 cross compiler
         if: ${{ matrix.target == 'linux-arm64' }}
@@ -104,14 +52,11 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release binary
-        run: |
-          if [ "${{ matrix.rustflags }}" != "" ]; then
-            export RUSTFLAGS="${{ matrix.rustflags }}"
-          else
-            unset RUSTFLAGS
-          fi
-          export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-          cargo build --locked --release --target "${{ matrix.triple }}"
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          TRIPLE: ${{ matrix.triple }}
+        run: cargo build --locked --release --target "$TRIPLE"
 
       - name: Collect release binary
         env:

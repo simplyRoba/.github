@@ -81,10 +81,9 @@ jobs:
 
 Builds the released tag for `linux/amd64` and `linux/arm64`, uploads `<binary-name>-linux-amd64` / `<binary-name>-linux-arm64` to the GitHub release, and pushes a multi-platform image to `ghcr.io/${{ github.repository }}`. The Docker build context expects the binaries at `release-artifacts/linux-amd64/<binary-name>` and `release-artifacts/linux-arm64/<binary-name>`.
 
-Every job checks out `refs/tags/${{ github.event.release.tag_name }}`, so the released source is built rather than the caller's default branch. Stable Docker aliases (`{{major}}`, `{{major}}.{{minor}}`, `latest`) are gated on `github.event.release.prerelease`, so a prerelease only publishes its own version tags.
+Every job checks out `refs/tags/${{ github.event.release.tag_name }}`, so the released source is built rather than the caller's default branch. Stable Docker aliases (`{{major}}`, `{{major}}.{{minor}}`, `latest`) are gated on `github.event.release.prerelease`, so a prerelease only publishes its own version tags. If the caller has a `.nvmrc`, Node is set up from it before `cargo build`.
 
 * **Inputs:** `binary-name` (required, string) — the binary produced by `cargo build --release`
-* **Node:** set up from `.nvmrc` before `cargo build` if the caller has one, for `build.rs` scripts that invoke npm
 * **Secrets:** none; the caller's `GITHUB_TOKEN` is used for release assets and the GHCR login
 * **Caller permissions:** `contents: write`, `packages: write`
 

@@ -51,6 +51,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # Some calling repositories build frontend assets from `build.rs` during
+      # `cargo build`. Those repositories declare their Node version in .nvmrc,
+      # which makes the otherwise implicit dependency on the runner image's
+      # preinstalled Node explicit. Repositories without .nvmrc are unaffected.
+      - name: Detect Node version file
+        id: node-version-file
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -f .nvmrc ]]; then
+            echo 'exists=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: ${{ steps.node-version-file.outputs.exists == 'true' }}
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
       - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc

@@ -4,35 +4,25 @@ Reusable GitHub Actions workflows for the `simplyRoba` repositories.
 
 ## Versioning
 
-Consumers should use `@v1`. Use `@v1.0.0` when an immutable exact version is required.
+Consumers normally use `@v1`. Exact pinning uses an immutable `@v1.x.y` tag, for example `@v1.0.0`.
 
-### Creating the initial version and major tags
+### Initial version
 
 ```bash
-git switch main
-git pull --ff-only
-commit=$(git rev-parse HEAD)
-
-git tag v1.0.0 "$commit"
-git tag v1 "$commit"
+git tag v1.0.0 <commit>
+git tag v1 <commit>
 git push --atomic origin refs/tags/v1.0.0 refs/tags/v1
 ```
 
-### Creating a new v1 version and moving v1
+### Next compatible version
 
 ```bash
-git switch main
-git pull --ff-only
-commit=$(git rev-parse HEAD)
-
-git tag v1.0.1 "$commit"
-git tag -f v1 "$commit"
-
-# Create the immutable version tag and force-update only the movable v1 tag.
+git tag v1.0.1 <commit>
+git tag -f v1 <commit>
 git push --atomic origin refs/tags/v1.0.1 +refs/tags/v1
 ```
 
-Verify both tags resolve to the intended commit:
+Verify both tags:
 
 ```bash
 git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.1
@@ -40,11 +30,9 @@ git ls-remote --tags origin refs/tags/v1 refs/tags/v1.0.1
 
 Rules:
 
-* Never move or force-push a `v1.x.y` tag.
-* Only the major tag (`v1`, `v2`, ...) is movable.
-* A published stable `v1.x.y` GitHub Release performs the `v1` movement automatically.
-* Prereleases and malformed release tags do not move a major tag.
-* Breaking workflow-interface changes start at `v2.0.0` and move `v2`, never `v1`.
+* `v1.x.y` tags are immutable and never move.
+* Only the major compatibility tag `v1` moves.
+* Breaking workflow-interface changes require `v2`.
 
 ## Rust release workflows
 

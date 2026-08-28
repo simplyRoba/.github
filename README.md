@@ -83,7 +83,10 @@ Builds the released tag for `linux/amd64` and `linux/arm64`, uploads `<binary-na
 
 Every job checks out `refs/tags/${{ github.event.release.tag_name }}`, so the released source is built rather than the caller's default branch. Stable Docker aliases (`{{major}}`, `{{major}}.{{minor}}`, `latest`) are gated on `github.event.release.prerelease`, so a prerelease only publishes its own version tags.
 
+If the released source contains a `.nvmrc` at the repository root, `actions/setup-node` runs before `cargo build` using `node-version-file: .nvmrc`. This is for callers whose `build.rs` shells out to npm to produce embedded frontend assets: committing a `.nvmrc` turns the otherwise implicit dependency on the runner image's preinstalled Node into a declared, pinned one. Callers without a `.nvmrc` skip the step entirely. The workflow never runs npm itself — `build.rs` stays responsible for its own npm commands.
+
 * **Inputs:** `binary-name` (required, string) — the binary produced by `cargo build --release`
+* **Node:** optional; set up from the caller's `.nvmrc` when present
 * **Secrets:** none; the caller's `GITHUB_TOKEN` is used for release assets and the GHCR login
 * **Caller permissions:** `contents: write`, `packages: write`
 
